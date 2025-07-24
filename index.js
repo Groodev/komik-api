@@ -6,7 +6,68 @@ const cors = require('cors');
 const path = require('path');
 
 const app = express();
+
+// Middleware
 app.use(cors());
+app.use(express.json());
+
+// Simple in-memory cache (untuk production sebaiknya gunakan Redis)
+const cache = new Map();
+const CACHE_DURATION = 5 * 60 * 1000; // 5 menit
+
+// Cache middleware
+function cacheMiddleware(duration = CACHE_DURATION) {
+  return (req, res, next) => {
+    const key = req.originalUrl;
+    const cached = cache.get(key);
+    
+    if (cached && Date.now() - cached.timestamp < duration) {
+      console.log(`Cache hit for ${key}`);
+      return res.json(cached.data);
+    }
+    
+    res.sendResponse = res.json;
+    res.json = (body) => {
+      cache.set(key, {
+        data: body,
+        timestamp: Date.now()
+      });
+      res.sendResponse(body);
+    };
+    
+    next();
+  };
+}
+
+// Rate limiting sederhana
+const requests = new Map();
+function rateLimiter(maxRequests = 100, windowMs = 60000) {
+  return (req, res, next) => {
+    const ip = req.ip || req.connection.remoteAddress;
+    const now = Date.now();
+    
+    if (!requests.has(ip)) {
+      requests.set(ip, []);
+    }
+    
+    const userRequests = requests.get(ip);
+    const validRequests = userRequests.filter(time => now - time < windowMs);
+    
+    if (validRequests.length >= maxRequests) {
+      return res.status(429).json({
+        message: 'Too many requests',
+        retry_after: Math.ceil(windowMs / 1000)
+      });
+    }
+    
+    validRequests.push(now);
+    requests.set(ip, validRequests);
+    next();
+  };
+}
+
+// Apply rate limiting to all API routes
+app.use('/api', rateLimiter(100, 60000));
 
 app.get('/', (req, res) => {
   const html = `
@@ -871,12 +932,12 @@ app.get('/api/scroll', async (req, res) => {
 app.get('/api/fullstats', async (req, res) => {
   try {
     const endpointTests = [
-      { name: 'terbaru', url: 'http://localhost:3001/api/terbaru?limit=5' },
-      { name: 'populer', url: 'http://localhost:3001/api/populer?limit=5' },
-      { name: 'infinite', url: 'http://localhost:3001/api/infinite?page=1&limit=5' },
-      { name: 'realtime', url: 'http://localhost:3001/api/realtime?count=5' },
-      { name: 'trending', url: 'http://localhost:3001/api/trending?limit=5' },
-      { name: 'browse', url: 'http://localhost:3001/api/browse?limit=5' }
+      { name: 'terbaru', url: 'http://localhost:3000/api/terbaru?limit=5' },
+      { name: 'populer', url: 'http://localhost:3000/api/populer?limit=5' },
+      { name: 'infinite', url: 'http://localhost:3000/api/infinite?page=1&limit=5' },
+      { name: 'realtime', url: 'http://localhost:3000/api/realtime?count=5' },
+      { name: 'trending', url: 'http://localhost:3000/api/trending?limit=5' },
+      { name: 'browse', url: 'http://localhost:3000/api/browse?limit=5' }
     ];
     
     const results = {};
@@ -938,7 +999,7 @@ app.get('/api/comparison', async (req, res) => {
       }
     });
     
-    const apiResponse = await axios.get('http://localhost:3001/api/unlimited?type=all&max_pages=2', {
+    const apiResponse = await axios.get('http://localhost:3000/api/unlimited?type=all&max_pages=2', {
       timeout: 30000
     });
     const apiData = apiResponse.data.comics || [];
@@ -973,9 +1034,9 @@ app.get('/api/comparison', async (req, res) => {
     
     if (demo === 'true') {
       const endpoints = [
-        { name: 'terbaru', url: 'http://localhost:3001/api/terbaru?limit=50' },
-        { name: 'realtime', url: 'http://localhost:3001/api/realtime?count=50' },
-        { name: 'unlimited', url: 'http://localhost:3001/api/unlimited?type=all&max_pages=1' }
+        { name: 'terbaru', url: 'http://localhost:3000/api/terbaru?limit=50' },
+        { name: 'realtime', url: 'http://localhost:3000/api/realtime?count=50' },
+        { name: 'unlimited', url: 'http://localhost:3000/api/unlimited?type=all&max_pages=1' }
       ];
       
       const endpointResults = {};
@@ -1004,11 +1065,11 @@ app.get('/api/comparison', async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
-app.get('/api/populer', async (req, res) => {
+app.get('/api/populer', cacheMiddleware(5 * 60 * 1000), async (req, res) => {
   try {
     const { page = 1, limit = 20 } = req.query;
     const maxLimit = Math.min(parseInt(limit), 50);
@@ -1153,7 +1214,7 @@ app.get('/api/populer', async (req, res) => {
   }
 });
 
-app.get('/api/terbaru', async (req, res) => {
+app.get('/api/terbaru', cacheMiddleware(3 * 60 * 1000), async (req, res) => {
   try {
     const { page = 1, limit = 20 } = req.query;
     const maxLimit = Math.min(parseInt(limit), 50); 
@@ -1982,6 +2043,583 @@ app.get('/api/browse', async (req, res) => {
   }
 });
 
+// Endpoint untuk mencari berdasarkan genre
+app.get('/api/genre/:genre', async (req, res) => {
+  try {
+    const { genre } = req.params;
+    const { page = 1, limit = 20 } = req.query;
+    const maxLimit = Math.min(parseInt(limit), 50);
+
+    const genreUrls = [
+      `https://komiku.org/genre/${genre}/`,
+      `https://komiku.org/genre/${genre}/page/${page}/`,
+      `https://komiku.org/pustaka/?genre=${genre}`,
+    ];
+
+    let allComics = [];
+
+    for (const url of genreUrls) {
+      try {
+        const response = await axios.get(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          }
+        });
+        const $ = cheerio.load(response.data);
+
+        $('.ls4, .bge, .bgei').each((i, el) => {
+          const title = $(el).find('h3 a, h4 a').text().trim();
+          const link = $(el).find('h3 a, h4 a').attr('href');
+          const image = $(el).find('img').attr('src') || $(el).find('img').attr('data-src');
+          const chapter = $(el).find('.ls24, .chapter').text().trim();
+
+          if (title && link && !allComics.find(c => c.link === link)) {
+            allComics.push({
+              title,
+              link,
+              image: image || 'https://komiku.org/asset/img/no-image.png',
+              chapter: chapter || 'Unknown',
+              genre: genre
+            });
+          }
+        });
+
+        if (allComics.length >= 50) break;
+      } catch (error) {
+        console.log(`Error fetching from ${url}:`, error.message);
+      }
+    }
+
+    const startIndex = (parseInt(page) - 1) * maxLimit;
+    const endIndex = startIndex + maxLimit;
+    const paginatedComics = allComics.slice(startIndex, endIndex);
+
+    res.json({
+      genre,
+      comics: paginatedComics,
+      pagination: {
+        current_page: parseInt(page),
+        per_page: maxLimit,
+        total: allComics.length,
+        has_more: endIndex < allComics.length
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching genre comics:', error);
+    res.status(500).json({ message: 'Error fetching genre comics', error: error.message });
+  }
+});
+
+// Endpoint untuk advanced search dengan filter
+app.get('/api/advanced-search', async (req, res) => {
+  try {
+    const { 
+      q, 
+      type = 'all',
+      status = 'all',
+      genre = 'all',
+      year = 'all',
+      page = 1, 
+      limit = 20,
+      sort = 'relevance'
+    } = req.query;
+
+    if (!q) {
+      return res.status(400).json({ message: 'Query parameter is required' });
+    }
+
+    const maxLimit = Math.min(parseInt(limit), 50);
+    let allComics = [];
+
+    // Search berdasarkan query dasar
+    const searchUrls = [
+      `https://komiku.org/?s=${encodeURIComponent(q)}`,
+      'https://komiku.org/pustaka/',
+      'https://komiku.org/daftar-komik/'
+    ];
+
+    if (type !== 'all') {
+      searchUrls.push(`https://komiku.org/pustaka/?tipe=${type}`);
+    }
+
+    if (genre !== 'all') {
+      searchUrls.push(`https://komiku.org/genre/${genre}/`);
+    }
+
+    for (const url of searchUrls) {
+      try {
+        const response = await axios.get(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          }
+        });
+        const $ = cheerio.load(response.data);
+
+        $('.ls4, .bge, .bgei, .entry').each((i, el) => {
+          const title = $(el).find('h3 a, h4 a, .title a').text().trim();
+          const link = $(el).find('h3 a, h4 a, .title a').attr('href');
+          const image = $(el).find('img').attr('src') || $(el).find('img').attr('data-src');
+          const chapter = $(el).find('.ls24, .chapter').text().trim();
+          const comicType = $(el).find('.type, .badge').text().trim() || 'Unknown';
+          const comicStatus = $(el).find('.status').text().trim() || 'Unknown';
+
+          if (title && link && title.toLowerCase().includes(q.toLowerCase())) {
+            // Apply filters
+            if (type !== 'all' && !comicType.toLowerCase().includes(type.toLowerCase())) {
+              return;
+            }
+
+            if (status !== 'all' && !comicStatus.toLowerCase().includes(status.toLowerCase())) {
+              return;
+            }
+
+            const exists = allComics.find(c => c.link === link);
+            if (!exists) {
+              const relevanceScore = calculateRelevance(title, q);
+              allComics.push({
+                title,
+                link,
+                image: image || 'https://komiku.org/asset/img/no-image.png',
+                chapter: chapter || 'Unknown',
+                type: comicType,
+                status: comicStatus,
+                relevance: relevanceScore
+              });
+            }
+          }
+        });
+
+        if (allComics.length >= 100) break;
+      } catch (error) {
+        console.log(`Error searching in ${url}:`, error.message);
+      }
+    }
+
+    // Sort results
+    switch (sort) {
+      case 'title':
+        allComics.sort((a, b) => a.title.localeCompare(b.title));
+        break;
+      case 'relevance':
+      default:
+        allComics.sort((a, b) => b.relevance - a.relevance);
+        break;
+    }
+
+    const startIndex = (parseInt(page) - 1) * maxLimit;
+    const endIndex = startIndex + maxLimit;
+    const paginatedResults = allComics.slice(startIndex, endIndex);
+
+    res.json({
+      query: q,
+      filters: { type, status, genre, year, sort },
+      comics: paginatedResults,
+      pagination: {
+        current_page: parseInt(page),
+        per_page: maxLimit,
+        total: allComics.length,
+        has_more: endIndex < allComics.length
+      }
+    });
+  } catch (error) {
+    console.error('Error in advanced search:', error);
+    res.status(500).json({ message: 'Error in advanced search', error: error.message });
+  }
+});
+
+// Helper function untuk menghitung relevance
+function calculateRelevance(title, query) {
+  const lowerTitle = title.toLowerCase();
+  const lowerQuery = query.toLowerCase();
+  
+  if (lowerTitle === lowerQuery) return 100;
+  if (lowerTitle.startsWith(lowerQuery)) return 90;
+  if (lowerTitle.includes(lowerQuery)) return 70;
+  
+  // Check untuk kata-kata individual
+  const queryWords = lowerQuery.split(' ');
+  let wordMatches = 0;
+  
+  queryWords.forEach(word => {
+    if (lowerTitle.includes(word)) {
+      wordMatches++;
+    }
+  });
+  
+  return Math.round((wordMatches / queryWords.length) * 50);
+}
+
+// Endpoint untuk bookmark/favorites (simulasi dengan local storage)
+app.get('/api/favorites', async (req, res) => {
+  try {
+    // Ini adalah simulasi endpoint favorites
+    // Dalam implementasi nyata, ini akan menggunakan database
+    res.json({
+      message: "Favorites endpoint ready",
+      note: "This endpoint requires user authentication and database integration",
+      example_usage: "POST /api/favorites with comic data to add favorites",
+      sample_data: [
+        {
+          title: "Sample Favorite Comic",
+          link: "/manga/sample-comic/",
+          image: "https://komiku.org/asset/img/sample.jpg",
+          added_date: new Date().toISOString()
+        }
+      ]
+    });
+  } catch (error) {
+    console.error('Error in favorites endpoint:', error);
+    res.status(500).json({ message: 'Error in favorites endpoint', error: error.message });
+  }
+});
+
+// Endpoint untuk mendapatkan comic recommendations
+app.get('/api/recommendations', async (req, res) => {
+  try {
+    const { based_on, limit = 10 } = req.query;
+    const maxLimit = Math.min(parseInt(limit), 20);
+
+    let recommendations = [];
+
+    // Ambil comic populer sebagai rekomendasi
+    const sources = [
+      'https://komiku.org/other/hot/',
+      'https://komiku.org/pustaka/?orderby=meta_value_num',
+      'https://komiku.org/'
+    ];
+
+    for (const url of sources) {
+      try {
+        const response = await axios.get(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          }
+        });
+        const $ = cheerio.load(response.data);
+
+        $('.ls4, .bge, .bgei').each((i, el) => {
+          const title = $(el).find('h3 a, h4 a').text().trim();
+          const link = $(el).find('h3 a, h4 a').attr('href');
+          const image = $(el).find('img').attr('src') || $(el).find('img').attr('data-src');
+          const chapter = $(el).find('.ls24, .chapter').text().trim();
+
+          if (title && link && !recommendations.find(r => r.link === link)) {
+            recommendations.push({
+              title,
+              link,
+              image: image || 'https://komiku.org/asset/img/no-image.png',
+              chapter: chapter || 'Unknown',
+              recommendation_score: Math.random() * 10,
+              reason: 'Popular comic'
+            });
+          }
+        });
+
+        if (recommendations.length >= 30) break;
+      } catch (error) {
+        console.log(`Error fetching recommendations from ${url}:`, error.message);
+      }
+    }
+
+    // Randomize dan ambil sesuai limit
+    recommendations = recommendations
+      .sort(() => Math.random() - 0.5)
+      .slice(0, maxLimit);
+
+    res.json({
+      based_on: based_on || 'popular_comics',
+      recommendations,
+      count: recommendations.length,
+      generated_at: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Error getting recommendations:', error);
+    res.status(500).json({ message: 'Error getting recommendations', error: error.message });
+  }
+});
+
+// Endpoint untuk analytics dan statistik detail
+app.get('/api/analytics', async (req, res) => {
+  try {
+    const analytics = {
+      api_info: {
+        version: "2.0.0",
+        total_endpoints: 25,
+        cache_enabled: true,
+        rate_limiting: true
+      },
+      performance: {
+        uptime_seconds: Math.floor(process.uptime()),
+        memory_usage: {
+          used: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)} MB`,
+          total: `${Math.round(process.memoryUsage().heapTotal / 1024 / 1024)} MB`,
+          percentage: Math.round((process.memoryUsage().heapUsed / process.memoryUsage().heapTotal) * 100)
+        },
+        cache_stats: {
+          total_entries: cache.size,
+          hit_rate: "Not implemented yet"
+        }
+      },
+      endpoints: [
+        { path: "/api/terbaru", status: "active", cache: "3min" },
+        { path: "/api/populer", status: "active", cache: "5min" },
+        { path: "/api/search", status: "active", cache: "none" },
+        { path: "/api/comic/:slug", status: "active", cache: "none" },
+        { path: "/api/chapter/:segment", status: "active", cache: "none" },
+        { path: "/api/unlimited", status: "active", cache: "none" },
+        { path: "/api/realtime", status: "active", cache: "none" },
+        { path: "/api/scroll", status: "active", cache: "none" },
+        { path: "/api/trending", status: "active", cache: "none" },
+        { path: "/api/comparison", status: "active", cache: "none" },
+        { path: "/api/type/:type", status: "active", cache: "none" },
+        { path: "/api/homepage", status: "active", cache: "none" },
+        { path: "/api/genres", status: "active", cache: "none" },
+        { path: "/api/random", status: "active", cache: "none" },
+        { path: "/api/stats", status: "active", cache: "none" },
+        { path: "/api/infinite", status: "active", cache: "none" },
+        { path: "/api/browse", status: "active", cache: "none" },
+        { path: "/api/fullstats", status: "active", cache: "none" },
+        { path: "/api/genre/:genre", status: "active", cache: "none" },
+        { path: "/api/advanced-search", status: "active", cache: "none" },
+        { path: "/api/recommendations", status: "active", cache: "none" },
+        { path: "/api/favorites", status: "active", cache: "none" },
+        { path: "/api/health", status: "active", cache: "none" },
+        { path: "/api/analytics", status: "active", cache: "none" }
+      ],
+      last_updated: new Date().toISOString()
+    };
+
+    res.json(analytics);
+  } catch (error) {
+    console.error('Error in analytics endpoint:', error);
+    res.status(500).json({ message: 'Error getting analytics', error: error.message });
+  }
+});
+
+// Endpoint untuk clean cache
+app.post('/api/cache/clear', (req, res) => {
+  try {
+    const { key } = req.body;
+    
+    if (key) {
+      cache.delete(key);
+      res.json({ message: `Cache cleared for key: ${key}` });
+    } else {
+      cache.clear();
+      res.json({ message: 'All cache cleared' });
+    }
+  } catch (error) {
+    console.error('Error clearing cache:', error);
+    res.status(500).json({ message: 'Error clearing cache', error: error.message });
+  }
+});
+
+// Endpoint untuk API documentation dalam format JSON
+app.get('/api/docs', (req, res) => {
+  try {
+    const documentation = {
+      title: "Komik API Documentation",
+      version: "2.0.0",
+      description: "RESTful API untuk mengakses ribuan komik dari Komiku.org",
+      base_url: `http://localhost:${PORT}`,
+      endpoints: {
+        basic_endpoints: [
+          {
+            path: "/api/terbaru",
+            method: "GET",
+            description: "Mengambil daftar komik terbaru",
+            parameters: {
+              page: "nomor halaman (optional, default: 1)",
+              limit: "jumlah item per halaman (optional, default: 20, max: 50)"
+            },
+            cache: "3 minutes"
+          },
+          {
+            path: "/api/populer",
+            method: "GET", 
+            description: "Mengambil daftar komik populer",
+            parameters: {
+              page: "nomor halaman (optional, default: 1)",
+              limit: "jumlah item per halaman (optional, default: 20, max: 50)"
+            },
+            cache: "5 minutes"
+          },
+          {
+            path: "/api/search",
+            method: "GET",
+            description: "Mencari komik berdasarkan kata kunci",
+            parameters: {
+              q: "kata kunci pencarian (required)",
+              page: "nomor halaman (optional, default: 1)",
+              limit: "jumlah item per halaman (optional, default: 20, max: 50)"
+            }
+          },
+          {
+            path: "/api/comic/:slug",
+            method: "GET",
+            description: "Mengambil detail komik berdasarkan slug",
+            parameters: {
+              slug: "slug komik (required)"
+            }
+          },
+          {
+            path: "/api/chapter/:segment",
+            method: "GET",
+            description: "Mengambil gambar-gambar chapter",
+            parameters: {
+              segment: "segment link chapter (required)"
+            }
+          }
+        ],
+        advanced_endpoints: [
+          {
+            path: "/api/unlimited",
+            method: "GET",
+            description: "Akses maksimum ke ribuan komik dengan deep crawling",
+            parameters: {
+              type: "tipe komik (optional, default: 'all')",
+              max_pages: "maksimal halaman untuk crawl (optional, default: 3, max: 6)",
+              aggressive: "mode agresif untuk lebih banyak data (optional, default: false)"
+            }
+          },
+          {
+            path: "/api/realtime",
+            method: "GET",
+            description: "Data real-time dengan parallel fetching",
+            parameters: {
+              count: "jumlah komik (optional, default: 48, max: 100)",
+              fresh: "hanya data terbaru (optional, default: false)",
+              categories: "kategori komik (optional, default: 'all')",
+              randomize: "acak urutan (optional, default: false)"
+            }
+          },
+          {
+            path: "/api/scroll",
+            method: "GET",
+            description: "Simulasi infinite scroll dengan offset pagination",
+            parameters: {
+              offset: "offset data (optional, default: 0)",
+              batch_size: "ukuran batch (optional, default: 20, max: 50)",
+              seed: "seed untuk randomize (optional)",
+              type: "tipe data (optional, default: 'mixed')"
+            }
+          },
+          {
+            path: "/api/genre/:genre",
+            method: "GET",
+            description: "Mengambil komik berdasarkan genre",
+            parameters: {
+              genre: "nama genre (required)",
+              page: "nomor halaman (optional, default: 1)",
+              limit: "jumlah item per halaman (optional, default: 20, max: 50)"
+            }
+          },
+          {
+            path: "/api/advanced-search",
+            method: "GET",
+            description: "Pencarian lanjutan dengan filter",
+            parameters: {
+              q: "kata kunci (required)",
+              type: "tipe komik (optional, default: 'all')",
+              status: "status komik (optional, default: 'all')",
+              genre: "genre komik (optional, default: 'all')",
+              year: "tahun rilis (optional, default: 'all')",
+              sort: "urutan hasil (optional, default: 'relevance')",
+              page: "nomor halaman (optional, default: 1)",
+              limit: "jumlah item per halaman (optional, default: 20, max: 50)"
+            }
+          }
+        ],
+        utility_endpoints: [
+          {
+            path: "/api/health",
+            method: "GET",
+            description: "Health check dan monitoring status"
+          },
+          {
+            path: "/api/analytics",
+            method: "GET",
+            description: "Analytics dan statistik detail API"
+          },
+          {
+            path: "/api/stats",
+            method: "GET",
+            description: "Statistik umum API"
+          },
+          {
+            path: "/api/recommendations",
+            method: "GET",
+            description: "Rekomendasi komik",
+            parameters: {
+              based_on: "basis rekomendasi (optional)",
+              limit: "jumlah rekomendasi (optional, default: 10, max: 20)"
+            }
+          },
+          {
+            path: "/api/favorites",
+            method: "GET",
+            description: "Endpoint untuk favorites (memerlukan implementasi database)"
+          }
+        ]
+      },
+      rate_limiting: {
+        enabled: true,
+        max_requests: 100,
+        window: "60 seconds"
+      },
+      caching: {
+        enabled: true,
+        default_duration: "5 minutes",
+        endpoints_with_cache: ["/api/terbaru", "/api/populer"]
+      },
+      notes: [
+        "API ini dibuat untuk tujuan pembelajaran dan riset",
+        "Rate limiting diterapkan untuk mencegah abuse",
+        "Cache diterapkan pada endpoint tertentu untuk meningkatkan performa",
+        "Beberapa endpoint masih dalam pengembangan",
+        "Gunakan User-Agent yang proper untuk menghindari blocking"
+      ]
+    };
+
+    res.json(documentation);
+  } catch (error) {
+    console.error('Error in docs endpoint:', error);
+    res.status(500).json({ message: 'Error getting documentation', error: error.message });
+  }
+});
+
+// Endpoint untuk health check dan monitoring
+app.get('/api/health', async (req, res) => {
+  try {
+    const healthChecks = {
+      server: 'OK',
+      timestamp: new Date().toISOString(),
+      uptime: `${Math.floor(process.uptime())} seconds`,
+      memory: {
+        used: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)} MB`,
+        total: `${Math.round(process.memoryUsage().heapTotal / 1024 / 1024)} MB`
+      },
+      endpoints_status: {}
+    };
+
+    // Simple health check without external calls
+    healthChecks.endpoints_status = {
+      basic: 'OK',
+      cache: cache.size > 0 ? 'OK' : 'Empty',
+      rate_limit: 'OK'
+    };
+
+    res.json(healthChecks);
+  } catch (error) {
+    console.error('Error in health check:', error);
+    res.status(500).json({ message: 'Health check failed', error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
+  console.log(`📚 Komik API Documentation: http://localhost:${PORT}/`);
+  console.log(`🔍 Health Check: http://localhost:${PORT}/api/health`);
+  console.log(`📊 Analytics: http://localhost:${PORT}/api/analytics`);
+  console.log(`📖 API Docs: http://localhost:${PORT}/api/docs`);
 });
