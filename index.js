@@ -2616,10 +2616,16 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
-  console.log(`📚 Komik API Documentation: http://localhost:${PORT}/`);
-  console.log(`🔍 Health Check: http://localhost:${PORT}/api/health`);
-  console.log(`📊 Analytics: http://localhost:${PORT}/api/analytics`);
-  console.log(`📖 API Docs: http://localhost:${PORT}/api/docs`);
-});
+// For Vercel deployment
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(PORT, () => {
+    console.log(`Server is running on http://localhost:${PORT}`);
+    console.log(`📚 Komik API Documentation: http://localhost:${PORT}/`);
+    console.log(`🔍 Health Check: http://localhost:${PORT}/api/health`);
+    console.log(`📊 Analytics: http://localhost:${PORT}/api/analytics`);
+    console.log(`📖 API Docs: http://localhost:${PORT}/api/docs`);
+  });
+}
+
+// Export the Express app for Vercel
+module.exports = app;

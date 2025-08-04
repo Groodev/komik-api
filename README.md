@@ -43,6 +43,32 @@ chmod +x test-api.sh
 
 Server akan berjalan di `http://localhost:3000`
 
+## ☁️ Deployment
+
+### Deploy ke Vercel (Recommended)
+
+API ini sudah dikonfigurasi untuk deploy ke Vercel dengan mudah:
+
+1. **Via Vercel Dashboard:**
+   - Login ke [vercel.com](https://vercel.com)
+   - Import repository ini
+   - Klik Deploy (auto-detect konfigurasi)
+
+2. **Via Vercel CLI:**
+   ```bash
+   npm i -g vercel
+   vercel login
+   vercel --prod
+   ```
+
+3. **Via Git Push:**
+   - Connect repo ke Vercel
+   - Push ke branch `main` untuk auto-deploy
+
+📖 **Panduan lengkap:** Lihat [DEPLOYMENT.md](DEPLOYMENT.md)
+
+**Live Demo:** 🔗 `https://komik-api.vercel.app`
+
 ## 🔗 Quick Access URLs
 
 - **📊 Real-time Analytics:** `http://localhost:3000/api/analytics`
