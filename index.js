@@ -1,3 +1,5 @@
+// code build by Raja
+
 
 const express = require('express');
 const axios = require('axios');
@@ -11,7 +13,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Simple in-memory cache (untuk production sebaiknya gunakan Redis)
+
 const cache = new Map();
 const CACHE_DURATION = 5 * 60 * 1000; // 5 menit
 
@@ -1383,7 +1385,7 @@ app.get('/api/search', async (req, res) => {
     try {
       const searchResponse = await axios.get(`https://komiku.org/?s=${encodeURIComponent(q)}`, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.5',
           'Accept-Encoding': 'gzip, deflate, br',
@@ -1443,7 +1445,7 @@ app.get('/api/search', async (req, res) => {
         for (const url of sources) {
           const response = await axios.get(url, {
             headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
           });
           const $ = cheerio.load(response.data);
@@ -1681,28 +1683,154 @@ app.get('/api/homepage', async (req, res) => {
 app.get('/api/chapter/:chapter_link_segment/navigation', async (req, res) => {
   try {
     const { chapter_link_segment } = req.params;
+
+    // Ambil HTML halaman chapter
     const response = await axios.get(`https://komiku.org/${chapter_link_segment}/`, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-      }
+      },
+      timeout: 10000
     });
+
     const $ = cheerio.load(response.data);
 
+    // Bersihkan title
+    let currentChapter = $('title').text().trim().replace(/ - Komiku$/i, '').trim();
+
+    // Struktur output
     const navigation = {
-      currentChapter: $('title').text().trim(),
+      currentChapter,
       previousChapter: null,
       nextChapter: null
     };
 
-    $('.navig a, .pager a, .navigation a').each((i, el) => {
-      const text = $(el).text().trim().toLowerCase();
-      const link = $(el).attr('href');
-      if ((text.includes('previous') || text.includes('sebelumnya') || text.includes('prev')) && link) {
-        navigation.previousChapter = { text: $(el).text().trim(), link };
-      } else if ((text.includes('next') || text.includes('selanjutnya') || text.includes('lanjut')) && link) {
-        navigation.nextChapter = { text: $(el).text().trim(), link };
+    // Selector yang sering digunakan untuk navigation
+    const navigationSelectors = [
+      '.navig a', '.pager a', '.navigation a', '.chapter-nav a', '.nav-chapter a',
+      '.chap-nav a', '.chapter-navigation a', '.btn-nav', '.nav-btn', '.nextprev a',
+      '.next-prev a', '.chapter-pager a', 'a[class*="nav"]', 'a[class*="chapter"]', 'a[href*="chapter"]', 'a[rel]',
+      // tambahan untuk struktur akhir chapter / pagination yang ada di screenshot
+      '.nxpr a', '.topmenu a', '.bottommenu a', 'a.l'
+    ];
+
+    // Kumpulkan semua link kandidat yang mengandung 'chapter' atau rel prev/next
+    const candidates = [];
+
+    for (const selector of navigationSelectors) {
+      $(selector).each((i, el) => {
+        const $el = $(el);
+        const href = $el.attr('href');
+        if (!href) return;
+
+        // Abaikan link yang mengarah ke daftar chapter (contoh: /manga/.../#Chapter)
+        if (href.includes('#Chapter') || href.toLowerCase().includes('#chapter')) return;
+
+        // normalisasi link menjadi path saja
+        let path = href.startsWith('http') ? new URL(href).pathname : href;
+        // ensure leading slash
+        if (!path.startsWith('/')) path = '/' + path;
+
+        const text = ($el.text() || '').trim();
+        const rel = ($el.attr('rel') || '').toLowerCase();
+        const aria = ($el.attr('aria-label') || '').toLowerCase();
+        const cls = ($el.attr('class') || '').toLowerCase();
+        const titleAttr = ($el.attr('title') || '').toLowerCase();
+
+        // Jika anchor memiliki title yang menyebut 'chapter' atau class 'l' (struktur pagination di screenshot)
+        const looksLikeChapterLink = /chapter/i.test(titleAttr) || cls.split(' ').includes('l') || /-chapter-\d+\/?$/i.test(path);
+
+        // Simpan kandidat jika mengandung pola chapter, rel/aria yang relevan, teks numerik, atau terlihat seperti link chapter
+        const isNumericText = /^\d+(\.\d+)?$/.test(text); // Support decimal numbers
+        if (looksLikeChapterLink || path.match(/-chapter-\d+(\.\d+)?\/?$/i) || rel.includes('prev') || rel.includes('next') || aria || cls.match(/prev|next|sebelum|selanjutnya|lanjut/) || isNumericText) {
+          candidates.push({ path, text, rel, aria, cls, title: titleAttr });
+        }
+      });
+      // jangan break di sini — kita ingin mengumpulkan semua kandidat dari semua selector,
+      // tetapi jika Anda ingin mempercepat, bisa uncomment baris berikut untuk berhenti saat kandidat ditemukan
+      // if (candidates.length > 0) break;
+    }
+
+    // Jika ada kandidat, tentukan prev/next dengan aturan prioritas
+    if (candidates.length > 0) {
+      // Support untuk chapter dengan format desimal (contoh: 120.5)
+      const currentNumMatch = chapter_link_segment.match(/chapter-(\d+(?:\.\d+)?)$/i);
+      const currentNum = currentNumMatch ? parseFloat(currentNumMatch[1]) : null;
+
+      // 1) Gunakan rel jika ada
+      for (const c of candidates) {
+        if (c.rel.includes('prev')) navigation.previousChapter = { text: 'Previous Chapter', link: c.path };
+        if (c.rel.includes('next')) navigation.nextChapter = { text: 'Next Chapter', link: c.path };
       }
-    });
+
+      // 2) Gunakan aria-label atau class kata kunci
+      for (const c of candidates) {
+        if (!navigation.previousChapter && (c.aria.includes('prev') || c.aria.includes('sebelum') || c.cls.includes('prev') || c.cls.includes('previous') || c.cls.includes('sebelum'))) {
+          navigation.previousChapter = { text: 'Previous Chapter', link: c.path };
+        }
+        if (!navigation.nextChapter && (c.aria.includes('next') || c.aria.includes('selanjut') || c.cls.includes('next') || c.cls.includes('lanjut') || c.cls.includes('selanjutnya'))) {
+          navigation.nextChapter = { text: 'Next Chapter', link: c.path };
+        }
+      }
+
+      // 3) Gunakan teks (arrow atau kata)
+      for (const c of candidates) {
+        const t = c.text.toLowerCase();
+        if (!navigation.previousChapter && (t.includes('prev') || t.includes('previous') || t.includes('sebelum') || /[←‹«<]/.test(t))) {
+          navigation.previousChapter = { text: 'Previous Chapter', link: c.path };
+        }
+        if (!navigation.nextChapter && (t.includes('next') || t.includes('lanjut') || t.includes('selanjutnya') || /[→›»>]/.test(t))) {
+          navigation.nextChapter = { text: 'Next Chapter', link: c.path };
+        }
+      }
+
+      // 4) Jika masih belum lengkap dan ada nomor chapter, gunakan perbandingan nomor
+      if (( !navigation.previousChapter || !navigation.nextChapter ) && currentNum) {
+        // cari kandidat yang memiliki nomor chapter dalam path
+        const withNum = candidates.map(c => {
+          const m = c.path.match(/-chapter-(\d+(?:\.\d+)?)\/?$/i);
+          return m ? { ...c, num: parseFloat(m[1]) } : null;
+        }).filter(Boolean);
+
+        if (withNum.length > 0) {
+          // cari yang paling dekat lebih kecil -> previous ; paling dekat lebih besar -> next
+          let prev = null, next = null;
+          for (const c of withNum) {
+            if (c.num < currentNum) {
+              if (!prev || (currentNum - c.num) < (currentNum - prev.num)) prev = c;
+            }
+            if (c.num > currentNum) {
+              if (!next || (c.num - currentNum) < (next.num - currentNum)) next = c;
+            }
+          }
+          if (prev && !navigation.previousChapter) navigation.previousChapter = { text: 'Previous Chapter', link: prev.path };
+          if (next && !navigation.nextChapter) navigation.nextChapter = { text: 'Next Chapter', link: next.path };
+        }
+      }
+    }
+
+    // Jika masih belum ditemukan, fallback ke pattern otomatis (generate berdasarkan slug dan nomor)
+    // HANYA untuk previous chapter, JANGAN pernah generate next chapter secara otomatis
+    if (!navigation.previousChapter) {
+      const currentMatch = chapter_link_segment.match(/^(.+)-chapter-(\d+(?:\.\d+)?)$/i);
+      
+      if (currentMatch) {
+        const baseSlug = currentMatch[1];
+        const num = parseFloat(currentMatch[2]);
+        
+        // Previous chapter: hanya jika > 1 dan belum ada
+        if (num > 1) {
+          // Untuk chapter desimal seperti 120.5, previous-nya adalah 120
+          const prevNum = num % 1 === 0 ? num - 1 : Math.floor(num);
+          
+          if (prevNum >= 1) {
+            navigation.previousChapter = { 
+              text: 'Previous Chapter', 
+              link: `/${baseSlug}-chapter-${prevNum}/` 
+            };
+          }
+        }
+      }
+    }
 
     res.json(navigation);
   } catch (error) {
@@ -1963,7 +2091,7 @@ app.get('/api/browse', async (req, res) => {
     try {
       const response = await axios.get(finalUrl, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
       });
       const $ = cheerio.load(response.data);
@@ -1999,7 +2127,7 @@ app.get('/api/browse', async (req, res) => {
     if (allComics.length === 0) {
       const homeResponse = await axios.get('https://komiku.org/', {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
       });
       const $ = cheerio.load(homeResponse.data);
@@ -2067,7 +2195,7 @@ app.get('/api/genre/:genre', cacheMiddleware(5 * 60 * 1000), async (req, res) =>
         console.log(`Fetching genre data from: ${url}`);
         const response = await axios.get(url, {
           headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
           },
           timeout: 15000
         });
@@ -2092,14 +2220,11 @@ app.get('/api/genre/:genre', cacheMiddleware(5 * 60 * 1000), async (req, res) =>
             let title = $el.find('.ls4j h3 a, h3 a, h4 a, .title a, .entry-title a').text().trim();
             let link = $el.find('.ls4v a, .ls4j h3 a, h3 a, h4 a, .title a, .entry-title a').attr('href');
             let image = $el.find('.ls4v img, img').attr('data-src') || 
-                       $el.find('.ls4v img, img').attr('src') ||
-                       $el.find('img').attr('data-lazy-src');
-            
-            // Fallback for title and link
+                       $el.find('.ls4v img, img').attr('src');
+              
             if (!title) title = $el.find('a').first().attr('title') || $el.find('img').attr('alt') || '';
             if (!link) link = $el.find('a').first().attr('href');
             
-            // Enhanced chapter detection
             const chapter = $el.find('.ls24, .chapter, .new-chapter, .latest, .epxs').text().trim();
             const status = $el.find('.status, .completed, .ongoing').text().trim();
             const rating = $el.find('.rating, .score, .numscore').text().trim();
