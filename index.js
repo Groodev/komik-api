@@ -1680,6 +1680,12 @@ app.get('/api/homepage', async (req, res) => {
   }
 });
 
+// Fungsi untuk normalisasi path chapter (mengubah 120-5 menjadi 120.5)
+function normalizeChapterPath(path) {
+  // Ubah format chapter-120-5 menjadi chapter-120.5
+  return path.replace(/-chapter-(\d+)-(\d+)\/?$/, '-chapter-$1.$2/');
+}
+
 app.get('/api/chapter/:chapter_link_segment/navigation', async (req, res) => {
   try {
     const { chapter_link_segment } = req.params;
@@ -1741,8 +1747,10 @@ app.get('/api/chapter/:chapter_link_segment/navigation', async (req, res) => {
 
         // Simpan kandidat jika mengandung pola chapter, rel/aria yang relevan, teks numerik, atau terlihat seperti link chapter
         const isNumericText = /^\d+(\.\d+)?$/.test(text); // Support decimal numbers
-        if (looksLikeChapterLink || path.match(/-chapter-\d+(\.\d+)?\/?$/i) || rel.includes('prev') || rel.includes('next') || aria || cls.match(/prev|next|sebelum|selanjutnya|lanjut/) || isNumericText) {
-          candidates.push({ path, text, rel, aria, cls, title: titleAttr });
+        if (looksLikeChapterLink || path.match(/-chapter-\d+(\.\d+)?\/?$/i) || path.match(/-chapter-\d+-\d+\/?$/i) || rel.includes('prev') || rel.includes('next') || aria || cls.match(/prev|next|sebelum|selanjutnya|lanjut/) || isNumericText) {
+          // Normalisasi path sebelum menyimpan kandidat
+          const normalizedPath = normalizeChapterPath(path);
+          candidates.push({ path: normalizedPath, text, rel, aria, cls, title: titleAttr });
         }
       });
       // jangan break di sini — kita ingin mengumpulkan semua kandidat dari semua selector,
@@ -1787,8 +1795,17 @@ app.get('/api/chapter/:chapter_link_segment/navigation', async (req, res) => {
       if (( !navigation.previousChapter || !navigation.nextChapter ) && currentNum) {
         // cari kandidat yang memiliki nomor chapter dalam path
         const withNum = candidates.map(c => {
-          const m = c.path.match(/-chapter-(\d+(?:\.\d+)?)\/?$/i);
-          return m ? { ...c, num: parseFloat(m[1]) } : null;
+          // Support format chapter-120-5 yang seharusnya 120.5
+          let m = c.path.match(/-chapter-(\d+(?:\.\d+)?)\/?$/i);
+          if (!m) {
+            // Coba pattern chapter-120-5 (format alternatif untuk desimal)
+            m = c.path.match(/-chapter-(\d+)-(\d+)\/?$/i);
+            if (m) {
+              // Konversi 120-5 menjadi 120.5
+              return { ...c, num: parseFloat(`${m[1]}.${m[2]}`), normalizedPath: c.path.replace(/-(\d+)-(\d+)\/?$/, `-$1.$2/`) };
+            }
+          }
+          return m ? { ...c, num: parseFloat(m[1]), normalizedPath: c.path } : null;
         }).filter(Boolean);
 
         if (withNum.length > 0) {
@@ -1802,8 +1819,8 @@ app.get('/api/chapter/:chapter_link_segment/navigation', async (req, res) => {
               if (!next || (c.num - currentNum) < (next.num - currentNum)) next = c;
             }
           }
-          if (prev && !navigation.previousChapter) navigation.previousChapter = { text: 'Previous Chapter', link: prev.path };
-          if (next && !navigation.nextChapter) navigation.nextChapter = { text: 'Next Chapter', link: next.path };
+          if (prev && !navigation.previousChapter) navigation.previousChapter = { text: 'Previous Chapter', link: prev.normalizedPath || prev.path };
+          if (next && !navigation.nextChapter) navigation.nextChapter = { text: 'Next Chapter', link: next.normalizedPath || next.path };
         }
       }
     }
