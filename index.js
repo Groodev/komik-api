@@ -1312,19 +1312,61 @@ app.get('/api/comic/:slug', async (req, res) => {
     const $ = cheerio.load(response.data);
 
     let title = '';
+    
+    // Coba berbagai cara untuk mendapatkan title
     const scriptTitleMatch = response.data.match(/const judul = "(.*?)"/);
     if (scriptTitleMatch && scriptTitleMatch[1]) {
         title = scriptTitleMatch[1];
     }
 
     if (!title) {
+        // Coba dari <title> tag dengan pattern yang lebih fleksibel
         const pageTitle = $('title').text();
-        const titleMatch = pageTitle.match(/Baca (?:Manga|Manhwa|Manhua) (.*?) Bahasa Indonesia/);
+        let titleMatch = pageTitle.match(/Baca (?:Manga|Manhwa|Manhua) (.*?) Bahasa Indonesia/);
+        if (!titleMatch) {
+          titleMatch = pageTitle.match(/Komik (.*?) Bahasa Indonesia/);
+        }
+        if (!titleMatch) {
+          titleMatch = pageTitle.match(/^(.*?) - Komiku$/);
+        }
+        if (!titleMatch) {
+          titleMatch = pageTitle.match(/^(.*?) \|/);
+        }
         if (titleMatch && titleMatch[1]) {
           title = titleMatch[1].trim();
-        } else {
-          title = $('h1.jdl').text().trim();
         }
+    }
+
+    if (!title) {
+        // Coba dari berbagai selector h1
+        title = $('h1.jdl').text().trim() || 
+               $('h1').first().text().trim() ||
+               $('.entry h1').text().trim() ||
+               $('.title h1').text().trim() ||
+               $('.entry-title').text().trim() ||
+               $('.post-title').text().trim();
+    }
+
+    if (!title) {
+        // Coba dari meta tag
+        title = $('meta[property="og:title"]').attr('content') ||
+               $('meta[name="title"]').attr('content');
+        if (title) {
+          title = title.replace(/ - Komiku$/, '').trim();
+        }
+    }
+
+    if (!title) {
+        // Coba dari breadcrumb atau navigation
+        title = $('.breadcrumb li:last-child').text().trim() ||
+               $('.nav-links .current').text().trim();
+    }
+
+    if (!title) {
+        // Fallback dari URL slug dengan formatting yang lebih baik
+        title = slug.split('-').map(word => 
+          word.charAt(0).toUpperCase() + word.slice(1)
+        ).join(' ');
     }
     
     const synopsis = $('p.desc').text().trim();
@@ -1332,8 +1374,11 @@ app.get('/api/comic/:slug', async (req, res) => {
     const chapters = [];
     $('#Daftar_Chapter tbody tr').each((i, el) => {
       const chapterTitle = $(el).find('a').text().trim();
-      const chapterLink = $(el).find('a').attr('href');
+      let chapterLink = $(el).find('a').attr('href');
+      
       if (chapterTitle && chapterLink) {
+        // Normalisasi link chapter (ubah 120-5 menjadi 120.5)
+        chapterLink = normalizeChapterPath(chapterLink);
         chapters.push({ chapter: chapterTitle, link: chapterLink });
       }
     });
