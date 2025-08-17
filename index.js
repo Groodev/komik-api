@@ -752,7 +752,7 @@ app.get('/api/unlimited', async (req, res) => {
                   (link.includes('/manga/') || link.includes('/komik/'))) {
                 comics.push({
                   title: title.substring(0, 100),
-                  link: link.startsWith('http') ? link : `https://komiku.org${link}`,
+                  link: convertToApiLink(link),
                   image: (image && image.startsWith('http')) ? image : 
                          image ? `https://komiku.org${image}` : 
                          'https://via.placeholder.com/200x300?text=No+Image',
@@ -1301,7 +1301,7 @@ app.get('/api/terbaru', cacheMiddleware(3 * 60 * 1000), async (req, res) => {
   }
 });
 
-app.get('/api/comic/:slug', async (req, res) => {
+app.get('/api/manga/:slug', async (req, res) => {
   try {
     const { slug } = req.params;
     const response = await axios.get(`https://komiku.org/manga/${slug}/`, {
@@ -1729,6 +1729,44 @@ app.get('/api/homepage', async (req, res) => {
 function normalizeChapterPath(path) {
   // Ubah format chapter-120-5 menjadi chapter-120.5
   return path.replace(/-chapter-(\d+)-(\d+)\/?$/, '-chapter-$1.$2/');
+}
+
+// Fungsi untuk mengkonversi link komiku.org menjadi API route internal
+function convertToApiLink(komikuLink) {
+  if (!komikuLink) return '';
+  
+  // Jika sudah berupa API link, return as is
+  if (komikuLink.startsWith('/api/manga/')) {
+    return komikuLink;
+  }
+  
+  // Extract slug dari link komiku.org
+  // Contoh: https://komiku.org/manga/spy-x-family/ -> spy-x-family
+  // Atau: /manga/spy-x-family/ -> spy-x-family
+  let slug = komikuLink;
+  
+  // Remove domain jika ada
+  if (slug.includes('komiku.org')) {
+    slug = slug.split('komiku.org')[1];
+  }
+  
+  // Remove leading slash
+  if (slug.startsWith('/')) {
+    slug = slug.substring(1);
+  }
+  
+  // Remove trailing slash
+  if (slug.endsWith('/')) {
+    slug = slug.slice(0, -1);
+  }
+  
+  // Extract slug dari path manga/
+  if (slug.startsWith('manga/')) {
+    slug = slug.replace('manga/', '');
+  }
+  
+  // Return API route
+  return `/api/manga/${slug}`;
 }
 
 app.get('/api/chapter/:chapter_link_segment/navigation', async (req, res) => {
@@ -2240,100 +2278,137 @@ app.get('/api/genre/:genre', cacheMiddleware(5 * 60 * 1000), async (req, res) =>
     const { page = 1, limit = 20 } = req.query;
     const maxLimit = Math.min(parseInt(limit), 50);
 
-    // Improved genre URLs with better coverage
-    const genreUrls = [
-      `https://komiku.org/genre/${genre}/`,
-      `https://komiku.org/genre/${genre}/page/${page}/`,
-      `https://komiku.org/pustaka/?genre=${genre}`,
-      `https://komiku.org/pustaka/?genre=${genre}&page=${page}`,
-      `https://komiku.org/pustaka/?orderby=modified&genre=${genre}`,
-    ];
+    console.log(`Genre search for: ${genre}`);
 
+    // Use internal search functionality that's already working
     let allComics = [];
-    const seenLinks = new Set();
-
-    for (const url of genreUrls) {
-      try {
-        console.log(`Fetching genre data from: ${url}`);
-        const response = await axios.get(url, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-          },
-          timeout: 15000
-        });
-        
-        const $ = cheerio.load(response.data);
-        
-        // Use improved selectors similar to working endpoints
-        const selectors = [
-          'article.ls4',    // Main comic articles
-          '.ls4',          // Alternative ls4 elements  
-          '.bge',          // Grid layout
-          '.bgei',         // Grid items
-          '.animpost',     // Animation posts
-          '.listupd article' // List updates
-        ];
-        
-        for (const selector of selectors) {
-          $(selector).each((i, el) => {
-            const $el = $(el);
-            
-            // Improved title extraction
-            let title = $el.find('.ls4j h3 a, h3 a, h4 a, .title a, .entry-title a').text().trim();
-            let link = $el.find('.ls4v a, .ls4j h3 a, h3 a, h4 a, .title a, .entry-title a').attr('href');
-            let image = $el.find('.ls4v img, img').attr('data-src') || 
-                       $el.find('.ls4v img, img').attr('src');
-              
-            if (!title) title = $el.find('a').first().attr('title') || $el.find('img').attr('alt') || '';
-            if (!link) link = $el.find('a').first().attr('href');
-            
-            const chapter = $el.find('.ls24, .chapter, .new-chapter, .latest, .epxs').text().trim();
-            const status = $el.find('.status, .completed, .ongoing').text().trim();
-            const rating = $el.find('.rating, .score, .numscore').text().trim();
-
-            if (title && link && title.length > 2 && 
-                (link.includes('/manga/') || link.includes('/komik/')) &&
-                !seenLinks.has(link)) {
-              
-              seenLinks.add(link);
-              allComics.push({
-                title: title.substring(0, 100),
-                link: link.startsWith('http') ? link : `https://komiku.org${link}`,
-                image: (image && image.startsWith('http')) ? image : 
-                       image ? `https://komiku.org${image}` : 
-                       'https://komiku.org/asset/img/no-image.png',
-                chapter: chapter || 'Latest',
-                status: status || null,
-                rating: rating || null,
-                genre: genre,
-                source: url,
-                selector_used: selector,
-                fetched_at: new Date().toISOString()
-              });
-            }
-          });
+    
+    // Strategy 1: Use existing search endpoint logic
+    try {
+      const searchResponse = await axios.get(`https://komiku.org/?s=${encodeURIComponent(genre)}`, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.5',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'DNT': '1',
+          'Connection': 'keep-alive',
+          'Upgrade-Insecure-Requests': '1'
         }
+      });
+      
+      const $ = cheerio.load(searchResponse.data);
+      
+      const isSearchResults = !$('body').text().includes('Tidak ditemukan') && 
+                             $('article.ls4, .bge').length > 0;
 
-        console.log(`Found ${allComics.length} comics so far from ${url}`);
-        if (allComics.length >= 100) break; // Stop when we have enough data
+      if (isSearchResults) {
+        console.log(`Found search results for ${genre}`);
+        $('article.ls4, .bge').each((i, el) => {
+          const title = $(el).find('.ls4j h3 a, h3 a, h4 a, .title a').text().trim();
+          const link = $(el).find('.ls4v a, .ls4j h3 a, h3 a, h4 a, .title a').attr('href');
+          const image = $(el).find('.ls4v img, img').attr('data-src') || 
+                       $(el).find('.ls4v img, img').attr('src');
+          const chapter = $(el).find('.ls24, .chapter').text().trim();
+          
+          if (title && link && allComics.length < 100) {
+            allComics.push({
+              title,
+              link: convertToApiLink(link),
+              image: image || 'https://komiku.org/asset/img/no-image.png',
+              chapter: chapter || 'Latest',
+              genre: genre,
+              source: 'search_results',
+              relevance: title.toLowerCase().includes(genre.toLowerCase()) ? 100 : 50
+            });
+          }
+        });
+      }
+    } catch (searchError) {
+      console.log(`Search failed: ${searchError.message}`);
+    }
+
+    // Strategy 2: If no search results, use curated genre lists
+    if (allComics.length === 0) {
+      console.log(`No search results, using curated content for ${genre}`);
+      
+      // Define genre-specific keywords and known comics
+      const genreMapping = {
+        'action': ['fight', 'battle', 'war', 'warrior', 'sword', 'martial', 'combat', 'hero'],
+        'romance': ['love', 'romance', 'wedding', 'marriage', 'dating', 'relationship', 'heart'],
+        'fantasy': ['magic', 'dragon', 'elf', 'wizard', 'fantasy', 'spell', 'kingdom', 'quest'],
+        'isekai': ['isekai', 'reincarn', 'another world', 'transported', 'summoned', 'reborn'],
+        'comedy': ['funny', 'comedy', 'laugh', 'humor', 'gag', 'joke'],
+        'drama': ['drama', 'tragedy', 'emotional', 'family', 'life'],
+        'adventure': ['adventure', 'journey', 'explore', 'treasure', 'quest'],
+        'ecchi': ['ecchi', 'harem', 'perverted', 'swimsuit'],
+        'horror': ['horror', 'scary', 'ghost', 'monster', 'demon', 'evil'],
+        'mystery': ['mystery', 'detective', 'crime', 'investigation', 'murder']
+      };
+
+      const keywords = genreMapping[genre.toLowerCase()] || [genre];
+      
+      try {
+        // Try multiple search terms
+        for (const keyword of keywords.slice(0, 3)) { // Limit to first 3 keywords
+          if (allComics.length >= 20) break;
+          
+          try {
+            const keywordResponse = await axios.get(`https://komiku.org/?s=${encodeURIComponent(keyword)}`, {
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+              }
+            });
+            
+            const $ = cheerio.load(keywordResponse.data);
+            
+            $('article.ls4, .bge').each((i, el) => {
+              const title = $(el).find('.ls4j h3 a, h3 a, h4 a, .title a').text().trim();
+              const link = $(el).find('.ls4v a, .ls4j h3 a, h3 a, h4 a, .title a').attr('href');
+              const image = $(el).find('.ls4v img, img').attr('data-src') || 
+                           $(el).find('.ls4v img, img').attr('src');
+              const chapter = $(el).find('.ls24, .chapter').text().trim();
+              
+              if (title && link && !allComics.find(c => c.link === link) && allComics.length < 50) {
+                const relevance = title.toLowerCase().includes(genre.toLowerCase()) ? 100 :
+                                title.toLowerCase().includes(keyword.toLowerCase()) ? 80 : 60;
+                
+                allComics.push({
+                  title,
+                  link: convertToApiLink(link),
+                  image: image || 'https://komiku.org/asset/img/no-image.png',
+                  chapter: chapter || 'Latest',
+                  genre: genre,
+                  source: `keyword_search_${keyword}`,
+                  relevance
+                });
+              }
+            });
+            
+            console.log(`Found ${allComics.length} comics after searching "${keyword}"`);
+            
+          } catch (keywordError) {
+            console.log(`Keyword search failed for "${keyword}": ${keywordError.message}`);
+          }
+        }
         
-      } catch (error) {
-        console.log(`Error fetching from ${url}:`, error.message);
-        continue; // Continue with next URL even if one fails
+      } catch (curatedError) {
+        console.log(`Curated search failed: ${curatedError.message}`);
       }
     }
 
-    // Fallback: If no comics found, try general search
+    // Strategy 3: Last resort - filtered homepage
     if (allComics.length === 0) {
-      console.log(`No comics found for genre ${genre}, trying fallback search`);
+      console.log(`Using filtered homepage for ${genre}`);
       try {
-        const fallbackResponse = await axios.get(`https://komiku.org/`, {
+        const homepageResponse = await axios.get(`https://komiku.org/`, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
           }
         });
         
-        const $ = cheerio.load(fallbackResponse.data);
+        const $ = cheerio.load(homepageResponse.data);
+        
         $('article.ls4').slice(0, 20).each((i, el) => {
           const title = $(el).find('.ls4j h3 a').text().trim();
           const link = $(el).find('.ls4v a').attr('href');
@@ -2343,30 +2418,33 @@ app.get('/api/genre/:genre', cacheMiddleware(5 * 60 * 1000), async (req, res) =>
           if (title && link) {
             allComics.push({
               title,
-              link: link.startsWith('http') ? link : `https://komiku.org${link}`,
+              link: convertToApiLink(link),
               image: image || 'https://komiku.org/asset/img/no-image.png',
               chapter: chapter || 'Latest',
               genre: genre,
-              source: 'fallback_homepage',
-              note: 'Fallback data from homepage'
+              source: 'filtered_homepage',
+              note: `Latest comics (genre-specific content not available for "${genre}")`,
+              relevance: title.toLowerCase().includes(genre.toLowerCase()) ? 70 : 30
             });
           }
         });
-      } catch (fallbackError) {
-        console.error('Fallback failed:', fallbackError.message);
+      } catch (homepageError) {
+        console.error('Homepage fallback failed:', homepageError.message);
       }
     }
 
-    // Sort by relevance (prioritize titles that contain genre name)
-    allComics.sort((a, b) => {
-      const aRelevant = a.title.toLowerCase().includes(genre.toLowerCase()) ? 1 : 0;
-      const bRelevant = b.title.toLowerCase().includes(genre.toLowerCase()) ? 1 : 0;
-      return bRelevant - aRelevant;
-    });
+    // Sort by relevance
+    allComics.sort((a, b) => (b.relevance || 0) - (a.relevance || 0));
 
+    // Remove duplicates
+    const uniqueComics = allComics.filter((comic, index, self) => 
+      index === self.findIndex(c => c.link === comic.link)
+    );
+
+    // Pagination
     const startIndex = (parseInt(page) - 1) * maxLimit;
     const endIndex = startIndex + maxLimit;
-    const paginatedComics = allComics.slice(startIndex, endIndex);
+    const paginatedComics = uniqueComics.slice(startIndex, endIndex);
 
     res.json({
       genre,
@@ -2374,17 +2452,21 @@ app.get('/api/genre/:genre', cacheMiddleware(5 * 60 * 1000), async (req, res) =>
       pagination: {
         current_page: parseInt(page),
         per_page: maxLimit,
-        total: allComics.length,
-        has_more: endIndex < allComics.length
+        total: uniqueComics.length,
+        has_more: endIndex < uniqueComics.length
       },
       metadata: {
-        sources_checked: genreUrls.length,
-        total_found: allComics.length,
+        total_found: uniqueComics.length,
         returned: paginatedComics.length,
         cache_enabled: true,
-        fetched_at: new Date().toISOString()
+        fetched_at: new Date().toISOString(),
+        method: allComics.length > 0 ? allComics[0].source : 'no_results',
+        note: uniqueComics.length > 0 ? 
+              `Found ${uniqueComics.length} comics related to "${genre}"` : 
+              `No comics found for genre "${genre}"`
       }
     });
+    
   } catch (error) {
     console.error('Error fetching genre comics:', error);
     res.status(500).json({ 
@@ -2392,9 +2474,10 @@ app.get('/api/genre/:genre', cacheMiddleware(5 * 60 * 1000), async (req, res) =>
       error: error.message,
       genre: req.params.genre,
       suggestions: [
-        'Try popular genres like: action, romance, adventure, comedy, drama, fantasy',
+        'Try popular genres like: action, romance, adventure, comedy, drama, fantasy, isekai',
         'Check if the genre name is spelled correctly',
-        'Use lowercase genre names'
+        'Use lowercase genre names',
+        'Try using the search endpoint instead: /api/search?q=' + req.params.genre
       ]
     });
   }
