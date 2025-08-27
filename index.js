@@ -2504,54 +2504,97 @@ app.get('/api/advanced-search', async (req, res) => {
     const maxLimit = Math.min(parseInt(limit), 50);
     let allComics = [];
 
-    // Search berdasarkan query dasar
-    const searchUrls = [
-      `https://komiku.org/?s=${encodeURIComponent(q)}`,
-      'https://komiku.org/pustaka/',
-      'https://komiku.org/daftar-komik/'
-    ];
+    // Strategy 1: Search di halaman daftar komik (lebih akurat untuk data manga)
+    try {
+      const daftarKomikResponse = await axios.get('https://komiku.org/daftar-komik/', {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+      });
+      const $ = cheerio.load(daftarKomikResponse.data);
 
-    if (type !== 'all') {
-      searchUrls.push(`https://komiku.org/pustaka/?tipe=${type}`);
+      $('.ls4').each((i, el) => {
+        const title = $(el).find('h4 a').text().trim();
+        const link = $(el).find('h4 a').attr('href');
+        const image = $(el).find('img').attr('data-src') || $(el).find('img').attr('src');
+        const typeStatus = $(el).find('.ls4s').text().trim();
+        const chapter = $(el).find('.ls4n').text().trim();
+
+        if (title && link && title.toLowerCase().includes(q.toLowerCase())) {
+          // Parse type dan status dari text
+          let comicType = 'Unknown';
+          let comicStatus = 'Unknown';
+          
+          // Cek semua span untuk mendapatkan status
+          const allSpans = $(el).find('.ls4s').map((i, span) => $(span).text().trim()).get();
+          const fullText = allSpans.join(' ').toLowerCase();
+          
+          if (fullText.includes('manga')) comicType = 'Manga';
+          else if (fullText.includes('manhwa')) comicType = 'Manhwa';
+          else if (fullText.includes('manhua')) comicType = 'Manhua';
+          
+          if (fullText.includes('status: end') || fullText.includes('completed')) comicStatus = 'Completed';
+          else if (fullText.includes('status: ongoing') || fullText.includes('ongoing')) comicStatus = 'Ongoing';
+          else if (fullText.includes('hiatus')) comicStatus = 'Hiatus';
+
+          // Apply filters
+          if (type !== 'all' && !comicType.toLowerCase().includes(type.toLowerCase())) {
+            return;
+          }
+
+          if (status !== 'all' && !comicStatus.toLowerCase().includes(status.toLowerCase())) {
+            return;
+          }
+
+          const exists = allComics.find(c => c.link === convertToApiLink(link));
+          if (!exists) {
+            const relevanceScore = calculateRelevance(title, q);
+            allComics.push({
+              title,
+              link: convertToApiLink(link),
+              image: image || 'https://komiku.org/asset/img/no-image.png',
+              chapter: chapter || 'Unknown',
+              type: comicType,
+              status: comicStatus,
+              relevance: relevanceScore
+            });
+          }
+        }
+      });
+    } catch (error) {
+      console.log('Error searching in daftar-komik:', error.message);
     }
 
-    if (genre !== 'all') {
-      searchUrls.push(`https://komiku.org/genre/${genre}/`);
-    }
-
-    for (const url of searchUrls) {
+    // Strategy 2: Search berdasarkan tipe jika ditentukan
+    if (type !== 'all' && allComics.length < 50) {
       try {
-        const response = await axios.get(url, {
+        const typeResponse = await axios.get(`https://komiku.org/pustaka/?tipe=${type}`, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
           }
         });
-        const $ = cheerio.load(response.data);
+        const $ = cheerio.load(typeResponse.data);
 
-        $('.ls4, .bge, .bgei, .entry').each((i, el) => {
-          const title = $(el).find('h3 a, h4 a, .title a').text().trim();
-          const link = $(el).find('h3 a, h4 a, .title a').attr('href');
-          const image = $(el).find('img').attr('src') || $(el).find('img').attr('data-src');
-          const chapter = $(el).find('.ls24, .chapter').text().trim();
-          const comicType = $(el).find('.type, .badge').text().trim() || 'Unknown';
-          const comicStatus = $(el).find('.status').text().trim() || 'Unknown';
+        $('.ls4').each((i, el) => {
+          const title = $(el).find('h4 a').text().trim();
+          const link = $(el).find('h4 a').attr('href');
+          const image = $(el).find('img').attr('data-src') || $(el).find('img').attr('src');
+          const typeStatus = $(el).find('.ls4s').text().trim();
+          const chapter = $(el).find('.ls4n').text().trim();
 
           if (title && link && title.toLowerCase().includes(q.toLowerCase())) {
-            // Apply filters
-            if (type !== 'all' && !comicType.toLowerCase().includes(type.toLowerCase())) {
-              return;
-            }
+            let comicType = type.charAt(0).toUpperCase() + type.slice(1);
+            let comicStatus = 'Unknown';
+            
+            if (typeStatus && typeStatus.toLowerCase().includes('completed')) comicStatus = 'Completed';
+            else if (typeStatus && typeStatus.toLowerCase().includes('ongoing')) comicStatus = 'Ongoing';
 
-            if (status !== 'all' && !comicStatus.toLowerCase().includes(status.toLowerCase())) {
-              return;
-            }
-
-            const exists = allComics.find(c => c.link === link);
+            const exists = allComics.find(c => c.link === convertToApiLink(link));
             if (!exists) {
               const relevanceScore = calculateRelevance(title, q);
               allComics.push({
                 title,
-                link,
+                link: convertToApiLink(link),
                 image: image || 'https://komiku.org/asset/img/no-image.png',
                 chapter: chapter || 'Unknown',
                 type: comicType,
@@ -2561,10 +2604,92 @@ app.get('/api/advanced-search', async (req, res) => {
             }
           }
         });
-
-        if (allComics.length >= 100) break;
       } catch (error) {
-        console.log(`Error searching in ${url}:`, error.message);
+        console.log(`Error searching by type ${type}:`, error.message);
+      }
+    }
+
+    // Strategy 3: Search berdasarkan genre jika ditentukan
+    if (genre !== 'all' && allComics.length < 50) {
+      try {
+        const genreResponse = await axios.get(`https://komiku.org/genre/${genre}/`, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          }
+        });
+        const $ = cheerio.load(genreResponse.data);
+
+        $('.ls4').each((i, el) => {
+          const title = $(el).find('h4 a').text().trim();
+          const link = $(el).find('h4 a').attr('href');
+          const image = $(el).find('img').attr('data-src') || $(el).find('img').attr('src');
+          const typeStatus = $(el).find('.ls4s').text().trim();
+          const chapter = $(el).find('.ls4n').text().trim();
+
+          if (title && link && title.toLowerCase().includes(q.toLowerCase())) {
+            let comicType = 'Unknown';
+            let comicStatus = 'Unknown';
+            
+            if (typeStatus) {
+              if (typeStatus.toLowerCase().includes('manga')) comicType = 'Manga';
+              else if (typeStatus.toLowerCase().includes('manhwa')) comicType = 'Manhwa';
+              else if (typeStatus.toLowerCase().includes('manhua')) comicType = 'Manhua';
+              
+              if (typeStatus.toLowerCase().includes('ongoing')) comicStatus = 'Ongoing';
+              else if (typeStatus.toLowerCase().includes('completed')) comicStatus = 'Completed';
+            }
+
+            const exists = allComics.find(c => c.link === convertToApiLink(link));
+            if (!exists) {
+              const relevanceScore = calculateRelevance(title, q);
+              allComics.push({
+                title,
+                link: convertToApiLink(link),
+                image: image || 'https://komiku.org/asset/img/no-image.png',
+                chapter: chapter || 'Unknown',
+                type: comicType,
+                status: comicStatus,
+                relevance: relevanceScore
+              });
+            }
+          }
+        });
+      } catch (error) {
+        console.log(`Error searching by genre ${genre}:`, error.message);
+      }
+    }
+
+    // Strategy 4: Get latest chapter info for top results (limit to avoid too many requests)
+    if (allComics.length > 0) {
+      const topComics = allComics.slice(0, Math.min(5, allComics.length)); // Only get chapter info for top 5 results
+      
+      for (const comic of topComics) {
+        if (comic.chapter === 'Unknown') {
+          try {
+            // Convert API link back to manga URL for fetching details
+            const mangaSlug = comic.link.replace('/api/manga/', '');
+            const detailResponse = await axios.get(`https://komiku.org/manga/${mangaSlug}/`, {
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+              },
+              timeout: 5000 // 5 second timeout per request
+            });
+            
+            const $ = cheerio.load(detailResponse.data);
+            
+            // Try different selectors for chapter info
+            let latestChapter = $('.new1 a span').last().text().trim() ||
+                              $('.wp-manga-chapter a').first().text().trim() ||
+                              $('.episodelist a').first().text().trim() ||
+                              $('.clstyle a').first().text().trim();
+            
+            if (latestChapter) {
+              comic.chapter = latestChapter;
+            }
+          } catch (error) {
+            console.log(`Error fetching chapter info for ${comic.title}:`, error.message);
+          }
+        }
       }
     }
 
